@@ -14,32 +14,6 @@ export default function HeadphoneScroll() {
     offset: ["start start", "end end"],
   });
 
-  // Load images
-  useEffect(() => {
-    const loadImages = async () => {
-      const loadedImages: HTMLImageElement[] = [];
-      const frameCount = 240; // Based on actual file count
-
-      for (let i = 1; i <= frameCount; i++) {
-        const img = new Image();
-        const frameIndex = i.toString().padStart(3, "0");
-        img.src = `/frames/ezgif-frame-${frameIndex}.jpg`;
-        await new Promise((resolve) => {
-          img.onload = () => resolve(null);
-          // Continue even if error to prevent hanging, but log it
-          img.onerror = () => {
-            console.error(`Failed to load frame ${i}`);
-            resolve(null);
-          };
-        });
-        loadedImages.push(img);
-      }
-      setImages(loadedImages);
-      setIsLoaded(true);
-    };
-
-    loadImages();
-  }, []);
 
   // Draw to canvas
   const renderFrame = React.useCallback((index: number) => {
@@ -50,35 +24,107 @@ export default function HeadphoneScroll() {
     if (!ctx) return;
 
     const img = images[index];
-    if (!img) return;
+    if (!img || img.naturalWidth === 0) return;
 
-    // Handle high DPI
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = window.innerWidth * dpr;
-    canvas.height = window.innerHeight * dpr;
+    const canvasWidth = canvas.width;
+    const canvasHeight = canvas.height;
 
     // Scale for containment
     const scale = Math.min(
-      canvas.width / img.width,
-      canvas.height / img.height
+      canvasWidth / img.naturalWidth,
+      canvasHeight / img.naturalHeight
     );
 
     // Center alignment
-    const x = canvas.width / 2 - (img.width / 2) * scale;
-    const y = canvas.height / 2 - (img.height / 2) * scale;
+    const x = canvasWidth / 2 - (img.naturalWidth / 2) * scale;
+    const y = canvasHeight / 2 - (img.naturalHeight / 2) * scale;
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // Optional: Fill background to ensure seamless edge if image has bg
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
     ctx.fillStyle = "#050505";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-    ctx.drawImage(img, x, y, img.width * scale, img.height * scale);
+    ctx.drawImage(img, x, y, img.naturalWidth * scale, img.naturalHeight * scale);
   }, [images]);
 
+  // Handle resize and canvas dimensions
+  const updateCanvasSize = React.useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    
+    // Initial render
+    const latest = scrollYProgress.get();
+    const frameIndex = Math.max(0, Math.min(
+      images.length - 1,
+      Math.floor(latest * (images.length - 1))
+    ));
+    if (images.length > 0) {
+        requestAnimationFrame(() => renderFrame(frameIndex));
+    }
+  }, [images.length, scrollYProgress, renderFrame]);
+
+  // Handle images loading
+  useEffect(() => {
+    let mounted = true;
+    const loadImages = async () => {
+      const frameCount = 240;
+      const loadedImages: HTMLImageElement[] = new Array(frameCount);
+      
+      // Load first 10 immediately to show something
+      const initialBatch = 10;
+      for (let i = 1; i <= initialBatch; i++) {
+        const img = new Image();
+        const frameIndex = i.toString().padStart(3, "0");
+        img.src = `/frames/ezgif-frame-${frameIndex}.jpg`;
+        await new Promise(r => { img.onload = r; img.onerror = r; });
+        loadedImages[i-1] = img;
+      }
+      
+      if (mounted) {
+        setImages([...loadedImages.filter(Boolean)]);
+      }
+
+      // Load the rest in batches
+      const batchSize = 20;
+      for (let i = initialBatch + 1; i <= frameCount; i += batchSize) {
+        if (!mounted) return;
+        const promises = [];
+        for (let j = 0; j < batchSize && (i + j) <= frameCount; j++) {
+          const idx = i + j;
+          const img = new Image();
+          img.src = `/frames/ezgif-frame-${idx.toString().padStart(3, "0")}.jpg`;
+          promises.push(new Promise(r => { img.onload = r; img.onerror = r; }));
+          loadedImages[idx-1] = img;
+        }
+        await Promise.all(promises);
+        if (mounted && i % 40 === 11) {
+            setImages([...loadedImages.filter(Boolean)]);
+        }
+      }
+      
+      if (mounted) {
+        setImages([...loadedImages.filter(Boolean)]);
+        setIsLoaded(true);
+      }
+    };
+
+    loadImages();
+    return () => { mounted = false; };
+  }, []);
+
+  // Draw to canvas
   // Sync scroll to frame
   useEffect(() => {
+    if (!isLoaded || images.length === 0) return;
+
+    // Initial render
+    updateCanvasSize();
+    renderFrame(0);
+
     const unsubscribe = scrollYProgress.on("change", (latest: number) => {
-      if (!isLoaded || images.length === 0) return;
       const frameIndex = Math.max(0, Math.min(
         images.length - 1,
         Math.floor(latest * (images.length - 1))
@@ -86,30 +132,12 @@ export default function HeadphoneScroll() {
       requestAnimationFrame(() => renderFrame(frameIndex));
     });
 
-    // Initial render
-    if (isLoaded && images.length > 0) {
-      renderFrame(0);
-    }
-
-    return () => unsubscribe();
-  }, [scrollYProgress, isLoaded, images, renderFrame]);
-
-  // Resize handler
-  useEffect(() => {
-    const handleResize = () => {
-      if (isLoaded && images.length > 0) {
-        // Re-render current frame
-        const latest = scrollYProgress.get();
-        const frameIndex = Math.min(
-          images.length - 1,
-          Math.floor(latest * (images.length - 1))
-        );
-        renderFrame(frameIndex);
-      }
+    window.addEventListener("resize", updateCanvasSize);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("resize", updateCanvasSize);
     };
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, [isLoaded, images, scrollYProgress, renderFrame]);
+  }, [scrollYProgress, isLoaded, images.length, renderFrame, updateCanvasSize]);
 
   // Text Opacities
   const opacity1 = useTransform(scrollYProgress, [0, 0.2], [1, 0]);
